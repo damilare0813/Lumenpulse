@@ -24,6 +24,71 @@ npm run test
 npm run test:e2e
 ```
 
+## Container image
+
+[`Dockerfile`](Dockerfile) builds a minimal production image:
+
+```bash
+docker build -f apps/backend/Dockerfile -t lumenpulse-backend apps/backend
+docker run --rm -p 3000:3000 \
+  -e DB_HOST=localhost -e DB_PORT=5432 \
+  -e DB_USERNAME=lumenpulse -e DB_PASSWORD=lumenpulse -e DB_DATABASE=lumenpulse \
+  -e JWT_SECRET=dev-secret \
+  -e STELLAR_SERVER_SECRET=SB6RIPM3GJQ7RP3Q6R5F3QIBYZHP4N27SGGCQ3R4LWA2ZKXZWQ3NU3G4 \
+  lumenpulse-backend
+```
+
+Or as part of the full stack — see [docs/LOCAL_STACK.md](../../docs/LOCAL_STACK.md):
+
+```bash
+docker compose up -d --build backend
+```
+
+### Stages
+
+| Stage | Contents | Used for |
+|---|---|---|
+| `builder` | Full toolchain, dev dependencies, compiled `dist/` | Building |
+| `migrate` | The builder, runnable | The one-shot `migration:run` job |
+| `runtime` (default) | Production dependencies and `dist/` only | The service |
+
+`runtime` is the deployable image. It has no compiler and no dev dependencies —
+TypeScript, Jest and ESLint are all left behind in `builder`.
+
+`migrate` exists because the migration toolchain is a devDependency:
+`migration:run` is `typeorm-ts-node-commonjs -d src/database/data-source.ts`,
+which needs `typeorm`, `ts-node` and `tsconfig-paths`, none of which are in
+`dependencies`. Rather than ship those three packages inside the service image,
+the migration job builds from `builder` and exits. Nothing serves traffic from it.
+
+```bash
+docker compose run --rm migrate
+```
+
+### Runtime behaviour
+
+- **Non-root.** Runs as uid/gid 10001, matching the other service images.
+- **`tini` as PID 1.** `docker stop` forwards SIGTERM to Nest's shutdown hooks
+  so in-flight requests drain. See [Graceful
+  Shutdown](#graceful-shutdown--deployment-configuration).
+- **No `.env` is copied in.** `lib/config.ts` refuses to read one outside
+  development, and every variable arrives as a real environment variable.
+- **Health checks.** `/health/live` answers as soon as the server is bound;
+  `/health` additionally probes Postgres, Redis, Horizon, Soroban and
+  data-processing. The image's own `HEALTHCHECK` uses `/health/live` on purpose
+  — an upstream outage must not make Docker restart the process.
+
+### Required environment
+
+`lib/config.ts` validates configuration at import time and throws with the
+missing variable named, so the container exits immediately rather than serving
+traffic half-configured. The variables with no default are `PORT`, `DB_HOST`,
+`DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_DATABASE`, `JWT_SECRET` and
+`STELLAR_SERVER_SECRET`; `CORS_ORIGIN` is additionally required when
+`NODE_ENV=production` and `PYTHON_API_URL` when `NODE_ENV` is neither
+`development` nor `test`. See
+[docs/ENVIRONMENT_VARIABLES.md](../../docs/ENVIRONMENT_VARIABLES.md).
+
 ## API contract (OpenAPI)
 
 `npm run build` regenerates the committed spec at `openapi.json`. Commit it with any API change, because CI fails when it is stale. `npm run openapi:check` checks it without writing. See [OPENAPI_CONTRACT.md](./OPENAPI_CONTRACT.md).
@@ -216,6 +281,41 @@ The backend natively supports graceful shutdown on `SIGTERM` and `SIGINT` signal
 Deployments should configure separate readiness and liveness endpoints instead of using the combined `/health` endpoint:
 - **Liveness:** `GET /health/live`
 - **Readiness:** `GET /health/ready`
+
+### Dependency health response
+
+`GET /health` and `GET /health/ready` return the same JSON report. The top-level
+`status` is `ok` or `error`; `summary` is `healthy`, `degraded`, or `down`.
+`dependencies` contains a stable entry for `database` (Postgres), `redis`,
+`horizon`, `sorobanRpc`, `python` (data-processing), `coinGecko`, and
+`exchangeRateApi`. Each entry has `status` (`up` or `down`), `latencyMs` (elapsed
+milliseconds, including failures and timeouts), `critical` (boolean), and an
+optional `message`. The existing `info`, `error`, `details`, and `latencyBudget`
+fields remain available. Do not alert on the text of `message`.
+
+```json
+{
+  "status": "ok",
+  "summary": "degraded",
+  "dependencies": {
+    "database": { "status": "up", "latencyMs": 2, "critical": true },
+    "redis": { "status": "down", "latencyMs": 3000, "critical": false, "message": "redis timed out" },
+    "horizon": { "status": "up", "latencyMs": 48, "critical": true },
+    "sorobanRpc": { "status": "up", "latencyMs": 61, "critical": true },
+    "python": { "status": "up", "latencyMs": 7, "critical": false },
+    "coinGecko": { "status": "up", "latencyMs": 22, "critical": false },
+    "exchangeRateApi": { "status": "up", "latencyMs": 19, "critical": false }
+  }
+}
+```
+
+Readiness returns HTTP 503 when Postgres, Horizon, or Soroban RPC is down, or
+when the shutdown drain begins. Optional dependency failures return HTTP 200
+with `summary: "degraded"`. Each Postgres, Redis, Python, and external API probe
+has a 3-second deadline; the Horizon and Soroban RPC probes use their configured
+latency budgets, with a 6-second cap on the combined budget report. `GET
+/health/live` returns HTTP 200 with `{ "status": "ok", "summary": "healthy" }`
+while the HTTP process can serve requests, without waiting on dependencies.
 
 Key environment variables:
 

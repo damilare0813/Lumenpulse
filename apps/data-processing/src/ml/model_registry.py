@@ -76,6 +76,11 @@ def _current_pointer_path(model_type: str) -> Path:
     return _model_dir(model_type) / "current.json"
 
 
+def _previous_pointer_path(model_type: str) -> Path:
+    """Pointer to the version that was live before the current one (#1457)."""
+    return _model_dir(model_type) / "previous.json"
+
+
 def _legacy_symlink_path(model_type: str) -> Path:
     return _model_dir(model_type) / "current"
 
@@ -146,7 +151,11 @@ def _read_current_version(model_type: str) -> Optional[str]:
 
 def _write_current_version(model_type: str, version: str) -> None:
     """Atomically persist the live model version in a JSON pointer."""
-    pointer = _current_pointer_path(model_type)
+    _write_pointer(_current_pointer_path(model_type), version)
+
+
+def _write_pointer(pointer: Path, version: str) -> None:
+    """Atomically write ``{"version": ...}`` to ``pointer`` via rename."""
     temporary_name = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -440,6 +449,10 @@ def promote_model(
             )
 
     with _lock:
+        previous_version = _read_current_version(model_type)
+        if previous_version and previous_version != version:
+            # Kept so retention GC (#1457) never removes the rollback target.
+            _write_pointer(_previous_pointer_path(model_type), previous_version)
         _write_current_version(model_type, version)
 
     # Hot-swap in memory
@@ -456,7 +469,91 @@ def promote_model(
     # Cached inference results from the previous model version must not be
     # served after promotion, so evict every entry for this model type.
     _invalidate_cached_inference(model_type)
+
+    # Attribute serving compute cost across the promotion boundary (#1643):
+    # the cost-per-thousand-inferences delta of the new version against its
+    # predecessor is exported as a metric and included in the cost report.
+    # Never let cost bookkeeping block an otherwise successful promotion.
+    try:
+        from src.ml.serving_cost import record_promotion
+
+        record_promotion(model_type, previous_version, version)
+    except Exception as exc:  # pragma: no cover - attribution is best-effort
+        logger.warning(
+            "Serving cost attribution skipped after promotion: type=%s error=%s",
+            model_type,
+            exc,
+        )
     return True
+
+
+def rollback_model(
+    model_type: str,
+    target_version: Optional[str] = None,
+    *,
+    actor: str,
+    reason: str,
+) -> str:
+    """Move the live pointer to a verified saved model version."""
+    if not actor.strip():
+        raise ValueError("Rollback actor must not be empty")
+    if not reason.strip():
+        raise ValueError("Rollback reason must not be empty")
+
+    with _lock:
+        from_version = _read_current_version(model_type)
+        available = list_versions(model_type)
+        if from_version is None:
+            raise ValueError(f"No current model for '{model_type}'. Cannot rollback.")
+        if len(available) < 2:
+            raise ValueError(
+                f"Only one version available for '{model_type}'. Cannot rollback."
+            )
+
+        if target_version is None:
+            prior_versions = [version for version in available if version < from_version]
+            if not prior_versions:
+                raise ValueError(
+                    f"No earlier version available for '{model_type}'. "
+                    "Specify a target version to rollback."
+                )
+            target_version = prior_versions[-1]
+        if target_version == from_version:
+            raise ValueError(
+                f"Target version '{target_version}' is already the current live version."
+            )
+        if target_version not in available:
+            raise ValueError(
+                f"Target version '{target_version}' not found for '{model_type}'. "
+                f"Available: {available}"
+            )
+
+        # Deserialize before moving the atomic pointer.
+        target_model = load_model(model_type, target_version)
+        _write_current_version(model_type, target_version)
+        _live_models[model_type] = target_model
+        _live_versions[model_type] = target_version
+
+    _record_promotion_event(
+        model_type,
+        {
+            "status": "rolled_back",
+            "model_type": model_type,
+            "actor": actor,
+            "reason": reason,
+            "from_version": from_version,
+            "to_version": target_version,
+        },
+    )
+    _invalidate_cached_inference(model_type)
+    logger.info(
+        "Model rolled back: type=%s from=%s to=%s actor=%s",
+        model_type,
+        from_version,
+        target_version,
+        actor,
+    )
+    return target_version
 
 
 def _invalidate_cached_inference(model_type: str) -> None:
@@ -965,7 +1062,13 @@ def save_model_with_card(
     Returns:
         The version string that was saved.
     """
-    from model_card import ModelCard, TrainingDataInfo, HyperparametersInfo, EvaluationMetrics, FeatureSchema
+    from src.ml.model_card import (
+        ModelCard,
+        TrainingDataInfo,
+        HyperparametersInfo,
+        EvaluationMetrics,
+        FeatureSchema,
+    )
 
     # Parse card data
     training = TrainingDataInfo(**card_data.get("training_data", {}))

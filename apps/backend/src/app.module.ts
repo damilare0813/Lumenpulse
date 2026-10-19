@@ -26,6 +26,7 @@ import { ExchangeRatesModule } from './exchange-rates/exchange-rates.module';
 import { WatchlistModule } from './watchlist/watchlist.module';
 import { ModerationModule } from './moderation/moderation.module';
 import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
+import { MessageTemplateModule } from './message-template/message-template.module';
 
 import databaseConfig from './database/database.config';
 import stellarConfig from './stellar/config/stellar.config';
@@ -43,6 +44,7 @@ import {
 import { TestController } from './test/test.controller';
 import { UploadModule } from './upload/upload.module';
 import { AuthModule } from './auth/auth.module';
+import { SupportModeModule } from './support-mode/support-mode.module';
 import { UsersModule } from './users/users.module';
 import { GrantsModule } from './grants/grants.module';
 import { HealthModule } from './health/health.module';
@@ -63,6 +65,7 @@ import { CrowdfundSyncModule } from './crowdfund-sync/crowdfund-sync.module';
 import { ContributorRegistryModule } from './contributor-registry/contributor-registry.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditLogInterceptor } from './audit/interceptors/audit-log.interceptor';
+import { DataRetentionModule } from './data-retention/data-retention.module';
 import { SorobanEventsModule } from './soroban-events/soroban-events.module';
 import { TreasuryModule } from './treasury/treasury.module';
 import { VestingWalletModule } from './vesting-wallet/vesting-wallet.module';
@@ -82,6 +85,8 @@ import { PriceAlertModule } from './price-alert/price-alert.module';
 import { ProfilingModule } from './common/profiling/profiling.module';
 import { QueryCountMiddleware } from './common/profiling/query-count.middleware';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { SavedSearchesModule } from './saved-searches/saved-searches.module';
+import { ServiceApiKeysModule } from './service-api-keys/service-api-keys.module';
 
 @Module({
   imports: [
@@ -143,6 +148,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
     WebhookModule,
     UploadModule,
     AuthModule,
+    SupportModeModule,
     UsersModule,
     HealthModule,
     SchedulerModule,
@@ -161,6 +167,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
     ModerationModule,
     SearchModule,
     FeatureFlagsModule,
+    MessageTemplateModule,
 
     // Crowdfund modules
     CrowdfundModule,
@@ -174,6 +181,9 @@ import { DashboardModule } from './dashboard/dashboard.module';
 
     // Audit
     AuditModule,
+
+    // Data retention and user erasure
+    DataRetentionModule,
 
     // Soroban event processing
     SorobanEventsModule,
@@ -224,6 +234,10 @@ import { DashboardModule } from './dashboard/dashboard.module';
 
     // Aggregated, cached dashboard read model
     DashboardModule,
+
+    // Saved searches & subscriptions
+    SavedSearchesModule,
+    ServiceApiKeysModule,
   ],
   controllers: [AppController, TestController, TestExceptionController],
   providers: [
